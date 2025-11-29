@@ -1,15 +1,16 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import '@rainbow-me/rainbowkit/styles.css';
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { getContractReadOnly, getContractWithSigner } from "./components/useContract";
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
 interface FanCard {
   id: string;
   name: string;
-  encryptedValue: string;
+  encryptedValue: any;
   publicValue1: number;
   publicValue2: number;
   description: string;
@@ -22,7 +23,8 @@ interface FanCard {
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [fanCards, setFanCards] = useState<FanCard[]>([]);
+  const [cards, setCards] = useState<FanCard[]>([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creatingCard, setCreatingCard] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
@@ -30,85 +32,124 @@ const App: React.FC = () => {
     status: "pending", 
     message: "" 
   });
-  const [newCardData, setNewCardData] = useState({ name: "", value: "", description: "" });
+  const [newCardData, setNewCardData] = useState({ name: "", tokenCount: "", description: "" });
   const [selectedCard, setSelectedCard] = useState<FanCard | null>(null);
-  const [decryptedData, setDecryptedData] = useState<number | null>(null);
+  const [decryptedCount, setDecryptedCount] = useState<number | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
-  const [searchTerm, setSearchTerm] = useState("");
-  const [history, setHistory] = useState<string[]>([]);
+  const [fhevmInitializing, setFhevmInitializing] = useState(false);
+  const [activeTab, setActiveTab] = useState("cards");
+  const [history, setHistory] = useState<any[]>([]);
+  const [faqVisible, setFaqVisible] = useState(false);
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
-  const { verifyDecryption } = useDecrypt();
+  const { verifyDecryption, isDecrypting: fheIsDecrypting } = useDecrypt();
 
   useEffect(() => {
-    const initFhevm = async () => {
-      if (!isConnected) return;
-      if (!isInitialized) {
-        try {
-          await initialize();
-        } catch (error) {
-          console.error('FHEVM init failed:', error);
-        }
+    const initFhevmAfterConnection = async () => {
+      if (!isConnected || fhevmInitializing || isInitialized) return;
+      
+      try {
+        setFhevmInitializing(true);
+        await initialize();
+      } catch (error) {
+        setTransactionStatus({ 
+          visible: true, 
+          status: "error", 
+          message: "FHEVM initialization failed" 
+        });
+        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+      } finally {
+        setFhevmInitializing(false);
       }
     };
-    initFhevm();
-  }, [isConnected, isInitialized, initialize]);
+
+    initFhevmAfterConnection();
+  }, [isConnected, isInitialized, initialize, fhevmInitializing]);
 
   useEffect(() => {
-    const loadData = async () => {
+    const loadDataAndContract = async () => {
       if (!isConnected) {
         setLoading(false);
         return;
       }
+      
       try {
+        await loadData();
         const contract = await getContractReadOnly();
-        if (!contract) return;
-        setContractAddress(await contract.getAddress());
-        const businessIds = await contract.getAllBusinessIds();
-        const cards: FanCard[] = [];
-        for (const id of businessIds) {
-          const data = await contract.getBusinessData(id);
-          cards.push({
-            id,
-            name: data.name,
-            encryptedValue: id,
-            publicValue1: Number(data.publicValue1),
-            publicValue2: Number(data.publicValue2),
-            description: data.description,
-            creator: data.creator,
-            timestamp: Number(data.timestamp),
-            isVerified: data.isVerified,
-            decryptedValue: Number(data.decryptedValue)
-          });
-        }
-        setFanCards(cards);
+        if (contract) setContractAddress(await contract.getAddress());
       } catch (error) {
-        console.error('Load data error:', error);
+        console.error('Failed to load data:', error);
       } finally {
         setLoading(false);
       }
     };
-    loadData();
+
+    loadDataAndContract();
   }, [isConnected]);
 
-  const createFanCard = async () => {
-    if (!isConnected || !address) {
+  const loadData = async () => {
+    if (!isConnected) return;
+    
+    setIsRefreshing(true);
+    try {
+      const contract = await getContractReadOnly();
+      if (!contract) return;
+      
+      const businessIds = await contract.getAllBusinessIds();
+      const cardsList: FanCard[] = [];
+      
+      for (const id of businessIds) {
+        try {
+          const data = await contract.getBusinessData(id);
+          cardsList.push({
+            id,
+            name: data.name,
+            encryptedValue: null,
+            publicValue1: Number(data.publicValue1) || 0,
+            publicValue2: Number(data.publicValue2) || 0,
+            description: data.description,
+            creator: data.creator,
+            timestamp: Number(data.timestamp),
+            isVerified: data.isVerified,
+            decryptedValue: Number(data.decryptedValue) || 0
+          });
+        } catch (e) {
+          console.error('Error loading card data:', e);
+        }
+      }
+      
+      setCards(cardsList);
+    } catch (e) {
+      setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+    } finally { 
+      setIsRefreshing(false); 
+    }
+  };
+
+  const createCard = async () => {
+    if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      return;
+      return; 
     }
+    
     setCreatingCard(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating fan card..." });
+    setTransactionStatus({ visible: true, status: "pending", message: "Creating card with FHE..." });
+    
     try {
       const contract = await getContractWithSigner();
-      if (!contract) throw new Error("No contract");
-      const value = parseInt(newCardData.value) || 0;
-      const encryptedResult = await encrypt(contractAddress, address, value);
-      const id = `fan-${Date.now()}`;
+      if (!contract) throw new Error("Failed to get contract");
+      
+      const tokenCount = parseInt(newCardData.tokenCount) || 0;
+      const cardId = `fanpass-${Date.now()}`;
+      
+      const encryptedResult = await encrypt(contractAddress, address, tokenCount);
+      
       const tx = await contract.createBusinessData(
-        id,
+        cardId,
         newCardData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
@@ -116,79 +157,157 @@ const App: React.FC = () => {
         0,
         newCardData.description
       );
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for confirmation..." });
+      
+      setTransactionStatus({ visible: true, status: "pending", message: "Confirming transaction..." });
       await tx.wait();
-      setHistory([...history, `Created card: ${newCardData.name}`]);
+      
+      setHistory([...history, {
+        type: "create",
+        id: cardId,
+        name: newCardData.name,
+        timestamp: Date.now()
+      }]);
+      
       setTransactionStatus({ visible: true, status: "success", message: "Card created!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
-        setShowCreateModal(false);
-        setNewCardData({ name: "", value: "", description: "" });
       }, 2000);
-      window.location.reload();
+      
+      await loadData();
+      setShowCreateModal(false);
+      setNewCardData({ name: "", tokenCount: "", description: "" });
     } catch (e: any) {
-      setTransactionStatus({ visible: true, status: "error", message: e.message || "Error creating card" });
+      const errorMessage = e.message?.includes("user rejected") 
+        ? "Transaction rejected" 
+        : "Creation failed";
+      setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-    } finally {
-      setCreatingCard(false);
+    } finally { 
+      setCreatingCard(false); 
     }
   };
 
-  const decryptValue = async (id: string) => {
-    if (!isConnected || !address) {
+  const decryptData = async (cardId: string): Promise<number | null> => {
+    if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      return null;
+      return null; 
     }
+    
     setIsDecrypting(true);
     try {
       const contractRead = await getContractReadOnly();
-      const contractWrite = await getContractWithSigner();
-      if (!contractRead || !contractWrite) return null;
-      const data = await contractRead.getBusinessData(id);
-      if (data.isVerified) {
-        setDecryptedData(Number(data.decryptedValue));
-        setHistory([...history, `Viewed decrypted value for: ${data.name}`]);
-        return Number(data.decryptedValue);
+      if (!contractRead) return null;
+      
+      const cardData = await contractRead.getBusinessData(cardId);
+      if (cardData.isVerified) {
+        const storedValue = Number(cardData.decryptedValue) || 0;
+        setDecryptedCount(storedValue);
+        
+        setHistory([...history, {
+          type: "verify",
+          id: cardId,
+          name: cardData.name,
+          timestamp: Date.now()
+        }]);
+        
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Data verified" 
+        });
+        setTimeout(() => {
+          setTransactionStatus({ visible: false, status: "pending", message: "" });
+        }, 2000);
+        
+        return storedValue;
       }
-      const encryptedValue = await contractRead.getEncryptedValue(id);
+      
+      const contractWrite = await getContractWithSigner();
+      if (!contractWrite) return null;
+      
+      const encryptedValueHandle = await contractRead.getEncryptedValue(cardId);
+      
       const result = await verifyDecryption(
-        [encryptedValue],
+        [encryptedValueHandle],
         contractAddress,
         (abiEncodedClearValues: string, decryptionProof: string) => 
-          contractWrite.verifyDecryption(id, abiEncodedClearValues, decryptionProof)
+          contractWrite.verifyDecryption(cardId, abiEncodedClearValues, decryptionProof)
       );
-      const clearValue = result.decryptionResult.clearValues[encryptedValue];
-      setDecryptedData(Number(clearValue));
-      setHistory([...history, `Decrypted value for: ${data.name}`]);
-      return Number(clearValue);
-    } catch (e: any) {
-      setTransactionStatus({ visible: true, status: "error", message: e.message || "Decryption failed" });
+      
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying..." });
+      
+      const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
+      const numericValue = Number(clearValue);
+      setDecryptedCount(numericValue);
+      
+      await loadData();
+      
+      setHistory([...history, {
+        type: "verify",
+        id: cardId,
+        name: selectedCard?.name || "",
+        timestamp: Date.now(),
+        value: numericValue
+      }]);
+      
+      setTransactionStatus({ visible: true, status: "success", message: "Decrypted successfully!" });
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 2000);
+      
+      return numericValue;
+      
+    } catch (e: any) { 
+      if (e.message?.includes("already verified")) {
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Already verified" 
+        });
+        setTimeout(() => {
+          setTransactionStatus({ visible: false, status: "pending", message: "" });
+        }, 2000);
+        
+        await loadData();
+        return null;
+      }
+      
+      setTransactionStatus({ 
+        visible: true, 
+        status: "error", 
+        message: "Decryption failed" 
+      });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      return null;
-    } finally {
-      setIsDecrypting(false);
+      return null; 
+    } finally { 
+      setIsDecrypting(false); 
     }
   };
 
-  const checkAvailability = async () => {
+  const callIsAvailable = async () => {
     try {
       const contract = await getContractReadOnly();
       if (!contract) return;
-      const available = await contract.isAvailable();
-      if (available) {
-        setTransactionStatus({ visible: true, status: "success", message: "Service is available!" });
+      
+      const result = await contract.isAvailable();
+      if (result) {
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Contract is available!" 
+        });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
       }
     } catch (e) {
-      console.error('Check availability error:', e);
+      setTransactionStatus({ 
+        visible: true, 
+        status: "error", 
+        message: "Availability check failed" 
+      });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
-
-  const filteredCards = fanCards.filter(card => 
-    card.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    card.description.toLowerCase().includes(searchTerm.toLowerCase())
-  );
 
   if (!isConnected) {
     return (
@@ -196,40 +315,55 @@ const App: React.FC = () => {
         <header className="app-header">
           <div className="logo">
             <h1>FanPass FHE 🔐</h1>
-            <p>Private Fan Membership</p>
           </div>
-          <div className="wallet-connect">
-            <ConnectButton />
+          <div className="header-actions">
+            <div className="wallet-connect-wrapper">
+              <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+            </div>
           </div>
         </header>
+        
         <div className="connection-prompt">
-          <div className="prompt-content">
-            <h2>Connect Your Wallet</h2>
-            <p>Join the private fan community with FHE encrypted membership</p>
-            <div className="fhe-badge">🔐 FHE Encrypted</div>
+          <div className="connection-content">
+            <div className="connection-icon">🔐</div>
+            <h2>Connect Wallet to Access</h2>
+            <p>Private fan membership powered by FHE encryption</p>
+            <div className="connection-steps">
+              <div className="step">
+                <span>1</span>
+                <p>Connect wallet to initialize FHE system</p>
+              </div>
+              <div className="step">
+                <span>2</span>
+                <p>Create encrypted fan membership cards</p>
+              </div>
+              <div className="step">
+                <span>3</span>
+                <p>Access exclusive content privately</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     );
   }
 
-  if (!isInitialized) {
+  if (!isInitialized || fhevmInitializing) {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE System...</p>
+        <p>Initializing FHE Encryption...</p>
+        <p>Status: {fhevmInitializing ? "Initializing" : status}</p>
       </div>
     );
   }
 
-  if (loading) {
-    return (
-      <div className="loading-screen">
-        <div className="fhe-spinner"></div>
-        <p>Loading Fan Cards...</p>
-      </div>
-    );
-  }
+  if (loading) return (
+    <div className="loading-screen">
+      <div className="fhe-spinner"></div>
+      <p>Loading FanPass system...</p>
+    </div>
+  );
 
   return (
     <div className="app-container">
@@ -238,230 +372,407 @@ const App: React.FC = () => {
           <h1>FanPass FHE 🔐</h1>
           <p>Private Fan Membership</p>
         </div>
+        
         <div className="header-actions">
           <button 
-            onClick={() => setShowCreateModal(true)}
-            className="create-button"
+            onClick={() => setShowCreateModal(true)} 
+            className="create-btn"
           >
-            + New Fan Card
+            + New Card
           </button>
-          <ConnectButton />
+          <button 
+            onClick={callIsAvailable}
+            className="test-btn"
+          >
+            Test Contract
+          </button>
+          <div className="wallet-connect-wrapper">
+            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          </div>
         </div>
       </header>
-
-      <div className="main-content">
-        <div className="stats-section">
-          <div className="stat-card">
-            <h3>Total Cards</h3>
-            <p>{fanCards.length}</p>
-          </div>
-          <div className="stat-card">
-            <h3>Verified</h3>
-            <p>{fanCards.filter(c => c.isVerified).length}</p>
-          </div>
-          <div className="stat-card">
-            <h3>Your Cards</h3>
-            <p>{fanCards.filter(c => c.creator === address).length}</p>
-          </div>
-        </div>
-
-        <div className="search-section">
-          <input
-            type="text"
-            placeholder="Search fan cards..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="search-input"
-          />
-          <button onClick={checkAvailability} className="check-button">
-            Check Service
+      
+      <div className="main-content-container">
+        <div className="tabs">
+          <button 
+            className={activeTab === "cards" ? "active" : ""}
+            onClick={() => setActiveTab("cards")}
+          >
+            My Cards
+          </button>
+          <button 
+            className={activeTab === "history" ? "active" : ""}
+            onClick={() => setActiveTab("history")}
+          >
+            History
+          </button>
+          <button 
+            className={activeTab === "about" ? "active" : ""}
+            onClick={() => setActiveTab("about")}
+          >
+            About
+          </button>
+          <button 
+            className={activeTab === "faq" ? "active" : ""}
+            onClick={() => {
+              setActiveTab("faq");
+              setFaqVisible(true);
+            }}
+          >
+            FAQ
           </button>
         </div>
-
-        <div className="cards-section">
-          <h2>Fan Cards</h2>
-          {filteredCards.length === 0 ? (
-            <div className="empty-state">
-              <p>No fan cards found</p>
-              <button 
-                onClick={() => setShowCreateModal(true)}
-                className="create-button"
-              >
-                Create First Card
-              </button>
+        
+        {activeTab === "cards" && (
+          <div className="cards-section">
+            <div className="section-header">
+              <h2>My FanPass Cards</h2>
+              <div className="header-actions">
+                <button 
+                  onClick={loadData} 
+                  className="refresh-btn" 
+                  disabled={isRefreshing}
+                >
+                  {isRefreshing ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
             </div>
-          ) : (
+            
             <div className="cards-grid">
-              {filteredCards.map((card) => (
+              {cards.length === 0 ? (
+                <div className="no-cards">
+                  <p>No fan cards found</p>
+                  <button 
+                    className="create-btn" 
+                    onClick={() => setShowCreateModal(true)}
+                  >
+                    Create First Card
+                  </button>
+                </div>
+              ) : cards.map((card, index) => (
                 <div 
-                  key={card.id} 
-                  className={`fan-card ${selectedCard?.id === card.id ? 'selected' : ''}`}
+                  className={`card-item ${selectedCard?.id === card.id ? "selected" : ""} ${card.isVerified ? "verified" : ""}`} 
+                  key={index}
                   onClick={() => setSelectedCard(card)}
                 >
-                  <div className="card-header">
-                    <h3>{card.name}</h3>
-                    <div className={`card-badge ${card.isVerified ? 'verified' : 'unverified'}`}>
-                      {card.isVerified ? 'Verified' : 'Unverified'}
-                    </div>
+                  <div className="card-badge">VIP</div>
+                  <div className="card-title">{card.name}</div>
+                  <div className="card-meta">
+                    <span>Created: {new Date(card.timestamp * 1000).toLocaleDateString()}</span>
                   </div>
-                  <p className="card-desc">{card.description}</p>
-                  <div className="card-footer">
-                    <span>{new Date(card.timestamp * 1000).toLocaleDateString()}</span>
-                    <span>{card.creator.substring(0, 6)}...{card.creator.substring(38)}</span>
+                  <div className="card-status">
+                    {card.isVerified ? "✅ Verified" : "🔓 Verify Tokens"}
+                  </div>
+                  <div className="card-creator">By: {card.creator.substring(0, 6)}...{card.creator.substring(38)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        
+        {activeTab === "history" && (
+          <div className="history-section">
+            <h2>Operation History</h2>
+            <div className="history-list">
+              {history.length === 0 ? (
+                <div className="no-history">
+                  <p>No operations recorded</p>
+                </div>
+              ) : history.map((record, index) => (
+                <div className="history-item" key={index}>
+                  <div className="history-type">{record.type === "create" ? "Created" : "Verified"}</div>
+                  <div className="history-details">
+                    <div className="history-name">{record.name}</div>
+                    <div className="history-id">ID: {record.id}</div>
+                    {record.value && <div className="history-value">Tokens: {record.value}</div>}
+                  </div>
+                  <div className="history-time">
+                    {new Date(record.timestamp).toLocaleTimeString()}
                   </div>
                 </div>
               ))}
             </div>
-          )}
-        </div>
-
-        <div className="history-section">
-          <h3>Your Activity</h3>
-          <div className="history-list">
-            {history.length === 0 ? (
-              <p>No activity yet</p>
-            ) : (
-              history.map((item, index) => (
-                <div key={index} className="history-item">
-                  <p>{item}</p>
-                </div>
-              ))
-            )}
+          </div>
+        )}
+        
+        {activeTab === "about" && (
+          <div className="about-section">
+            <h2>About FanPass FHE</h2>
+            <div className="about-content">
+              <div className="about-card">
+                <h3>Private Fan Membership</h3>
+                <p>FanPass uses fully homomorphic encryption (FHE) to protect your fan token holdings while still proving you meet access requirements.</p>
+              </div>
+              
+              <div className="about-card">
+                <h3>How It Works</h3>
+                <ol>
+                  <li>Encrypt your fan token count using Zama FHE</li>
+                  <li>Store encrypted data on-chain</li>
+                  <li>Verify access without revealing exact holdings</li>
+                  <li>Access exclusive content privately</li>
+                </ol>
+              </div>
+              
+              <div className="about-card">
+                <h3>Benefits</h3>
+                <ul>
+                  <li>Complete privacy for your holdings</li>
+                  <li>Secure access to VIP content</li>
+                  <li>Trustless verification system</li>
+                  <li>No central authority</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {activeTab === "faq" && faqVisible && (
+          <div className="faq-section">
+            <h2>Frequently Asked Questions</h2>
+            <div className="faq-content">
+              <div className="faq-item">
+                <h3>What is FHE?</h3>
+                <p>Fully Homomorphic Encryption allows computations on encrypted data without decrypting it first.</p>
+              </div>
+              
+              <div className="faq-item">
+                <h3>How are my tokens protected?</h3>
+                <p>Your token count is encrypted before being stored on-chain. Only you can decrypt it.</p>
+              </div>
+              
+              <div className="faq-item">
+                <h3>What can I access?</h3>
+                <p>Depending on your token holdings, you may access exclusive content, events, and communities.</p>
+              </div>
+              
+              <div className="faq-item">
+                <h3>Is this secure?</h3>
+                <p>Yes, FHE provides mathematical guarantees of privacy while allowing verification.</p>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      
+      {showCreateModal && (
+        <ModalCreateCard 
+          onSubmit={createCard} 
+          onClose={() => setShowCreateModal(false)} 
+          creating={creatingCard} 
+          cardData={newCardData} 
+          setCardData={setNewCardData}
+          isEncrypting={isEncrypting}
+        />
+      )}
+      
+      {selectedCard && (
+        <CardDetailModal 
+          card={selectedCard} 
+          onClose={() => { 
+            setSelectedCard(null); 
+            setDecryptedCount(null); 
+          }} 
+          decryptedCount={decryptedCount} 
+          isDecrypting={isDecrypting || fheIsDecrypting} 
+          decryptData={() => decryptData(selectedCard.id)}
+        />
+      )}
+      
+      {transactionStatus.visible && (
+        <div className="transaction-modal">
+          <div className="transaction-content">
+            <div className={`transaction-icon ${transactionStatus.status}`}>
+              {transactionStatus.status === "pending" && <div className="fhe-spinner"></div>}
+              {transactionStatus.status === "success" && <div className="success-icon">✓</div>}
+              {transactionStatus.status === "error" && <div className="error-icon">✗</div>}
+            </div>
+            <div className="transaction-message">{transactionStatus.message}</div>
           </div>
         </div>
+      )}
+      
+      <footer className="app-footer">
+        <p>FanPass FHE - Private Fan Membership System</p>
+        <p>Powered by Zama FHE Technology</p>
+      </footer>
+    </div>
+  );
+};
 
-        <div className="featured-section">
-          <h3>Featured Content</h3>
-          <div className="featured-content">
-            <div className="featured-item">
-              <h4>FHE Explained</h4>
-              <p>Learn how your fan data stays private</p>
-            </div>
-            <div className="featured-item">
-              <h4>Exclusive Perks</h4>
-              <p>Unlock special benefits with your membership</p>
-            </div>
+const ModalCreateCard: React.FC<{
+  onSubmit: () => void; 
+  onClose: () => void; 
+  creating: boolean;
+  cardData: any;
+  setCardData: (data: any) => void;
+  isEncrypting: boolean;
+}> = ({ onSubmit, onClose, creating, cardData, setCardData, isEncrypting }) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const { name, value } = e.target;
+    if (name === 'tokenCount') {
+      const intValue = value.replace(/[^\d]/g, '');
+      setCardData({ ...cardData, [name]: intValue });
+    } else {
+      setCardData({ ...cardData, [name]: value });
+    }
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="create-card-modal">
+        <div className="modal-header">
+          <h2>New FanPass Card</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="fhe-notice">
+            <strong>FHE 🔐 Encryption</strong>
+            <p>Token count will be encrypted with Zama FHE</p>
           </div>
+          
+          <div className="form-group">
+            <label>Card Name *</label>
+            <input 
+              type="text" 
+              name="name" 
+              value={cardData.name} 
+              onChange={handleChange} 
+              placeholder="Enter card name..." 
+            />
+          </div>
+          
+          <div className="form-group">
+            <label>Token Count *</label>
+            <input 
+              type="number" 
+              name="tokenCount" 
+              value={cardData.tokenCount} 
+              onChange={handleChange} 
+              placeholder="Enter token count..." 
+              min="0"
+            />
+            <div className="data-type-label">FHE Encrypted</div>
+          </div>
+          
+          <div className="form-group">
+            <label>Description</label>
+            <textarea 
+              name="description" 
+              value={cardData.description} 
+              onChange={handleChange} 
+              placeholder="Enter description..." 
+              rows={3}
+            />
+          </div>
+        </div>
+        
+        <div className="modal-footer">
+          <button onClick={onClose} className="cancel-btn">Cancel</button>
+          <button 
+            onClick={onSubmit} 
+            disabled={creating || isEncrypting || !cardData.name || !cardData.tokenCount} 
+            className="submit-btn"
+          >
+            {creating || isEncrypting ? "Encrypting..." : "Create Card"}
+          </button>
         </div>
       </div>
+    </div>
+  );
+};
 
-      {showCreateModal && (
-        <div className="modal-overlay">
-          <div className="create-modal">
-            <div className="modal-header">
-              <h2>Create Fan Card</h2>
-              <button onClick={() => setShowCreateModal(false)} className="close-button">
-                ×
-              </button>
+const CardDetailModal: React.FC<{
+  card: FanCard;
+  onClose: () => void;
+  decryptedCount: number | null;
+  isDecrypting: boolean;
+  decryptData: () => Promise<number | null>;
+}> = ({ card, onClose, decryptedCount, isDecrypting, decryptData }) => {
+  const handleDecrypt = async () => {
+    if (decryptedCount !== null) return;
+    await decryptData();
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="card-detail-modal">
+        <div className="modal-header">
+          <h2>FanPass Details</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="card-info">
+            <div className="info-item">
+              <span>Card Name:</span>
+              <strong>{card.name}</strong>
             </div>
-            <div className="modal-body">
-              <div className="form-group">
-                <label>Card Name</label>
-                <input
-                  type="text"
-                  value={newCardData.name}
-                  onChange={(e) => setNewCardData({...newCardData, name: e.target.value})}
-                  placeholder="Enter card name"
-                />
-              </div>
-              <div className="form-group">
-                <label>Fan Score (FHE Encrypted)</label>
-                <input
-                  type="number"
-                  value={newCardData.value}
-                  onChange={(e) => setNewCardData({...newCardData, value: e.target.value})}
-                  placeholder="Enter score (number only)"
-                />
-                <div className="fhe-tag">🔐 Encrypted</div>
-              </div>
-              <div className="form-group">
-                <label>Description</label>
-                <input
-                  type="text"
-                  value={newCardData.description}
-                  onChange={(e) => setNewCardData({...newCardData, description: e.target.value})}
-                  placeholder="Enter description"
-                />
-              </div>
+            <div className="info-item">
+              <span>Creator:</span>
+              <strong>{card.creator.substring(0, 6)}...{card.creator.substring(38)}</strong>
             </div>
-            <div className="modal-footer">
-              <button onClick={() => setShowCreateModal(false)} className="cancel-button">
-                Cancel
-              </button>
-              <button
-                onClick={createFanCard}
-                disabled={creatingCard || isEncrypting || !newCardData.name || !newCardData.value}
-                className="submit-button"
+            <div className="info-item">
+              <span>Created:</span>
+              <strong>{new Date(card.timestamp * 1000).toLocaleDateString()}</strong>
+            </div>
+          </div>
+          
+          <div className="data-section">
+            <h3>Encrypted Token Data</h3>
+            
+            <div className="data-row">
+              <div className="data-label">Token Count:</div>
+              <div className="data-value">
+                {card.isVerified ? 
+                  `${card.decryptedValue} (Verified)` : 
+                  decryptedCount !== null ? 
+                  `${decryptedCount} (Decrypted)` : 
+                  "🔒 Encrypted"
+                }
+              </div>
+              <button 
+                className={`decrypt-btn ${(card.isVerified || decryptedCount !== null) ? 'decrypted' : ''}`}
+                onClick={handleDecrypt} 
+                disabled={isDecrypting || card.isVerified}
               >
-                {creatingCard || isEncrypting ? "Creating..." : "Create Card"}
+                {isDecrypting ? (
+                  "🔓 Decrypting..."
+                ) : card.isVerified ? (
+                  "✅ Verified"
+                ) : decryptedCount !== null ? (
+                  "🔓 Decrypted"
+                ) : (
+                  "🔓 Decrypt Tokens"
+                )}
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {selectedCard && (
-        <div className="modal-overlay">
-          <div className="detail-modal">
-            <div className="modal-header">
-              <h2>{selectedCard.name}</h2>
-              <button onClick={() => {
-                setSelectedCard(null);
-                setDecryptedData(null);
-              }} className="close-button">
-                ×
-              </button>
-            </div>
-            <div className="modal-body">
-              <p className="card-description">{selectedCard.description}</p>
-              <div className="card-meta">
-                <div>
-                  <span>Creator:</span>
-                  <p>{selectedCard.creator.substring(0, 6)}...{selectedCard.creator.substring(38)}</p>
-                </div>
-                <div>
-                  <span>Created:</span>
-                  <p>{new Date(selectedCard.timestamp * 1000).toLocaleDateString()}</p>
-                </div>
-              </div>
-              <div className="card-data">
-                <div className="data-item">
-                  <span>Fan Score:</span>
-                  {selectedCard.isVerified ? (
-                    <p>{selectedCard.decryptedValue} (Verified)</p>
-                  ) : decryptedData !== null ? (
-                    <p>{decryptedData} (Decrypted)</p>
-                  ) : (
-                    <p>🔒 Encrypted</p>
-                  )}
-                </div>
-                <button
-                  onClick={() => decryptValue(selectedCard.id)}
-                  disabled={isDecrypting}
-                  className={`decrypt-button ${selectedCard.isVerified ? 'verified' : ''}`}
-                >
-                  {isDecrypting ? "Decrypting..." : selectedCard.isVerified ? "Verified" : decryptedData ? "Re-decrypt" : "Decrypt"}
-                </button>
-              </div>
-              <div className="fhe-info">
-                <div className="fhe-icon">🔐</div>
-                <p>This value is encrypted using FHE. Decryption happens client-side and is verified on-chain.</p>
+            
+            <div className="fhe-info">
+              <div className="fhe-icon">🔐</div>
+              <div>
+                <strong>FHE Privacy</strong>
+                <p>Your token count is encrypted on-chain. Only you can decrypt and verify it.</p>
               </div>
             </div>
           </div>
-        </div>
-      )}
-
-      {transactionStatus.visible && (
-        <div className="notification">
-          <div className={`notification-content ${transactionStatus.status}`}>
-            {transactionStatus.status === "pending" && <div className="spinner"></div>}
-            {transactionStatus.status === "success" && <div className="icon">✓</div>}
-            {transactionStatus.status === "error" && <div className="icon">✗</div>}
-            <p>{transactionStatus.message}</p>
+          
+          <div className="benefits-section">
+            <h3>Exclusive Benefits</h3>
+            <ul>
+              <li>Access to private fan community</li>
+              <li>Exclusive content and updates</li>
+              <li>Special events access</li>
+              <li>VIP merchandise</li>
+            </ul>
           </div>
         </div>
-      )}
+        
+        <div className="modal-footer">
+          <button onClick={onClose} className="close-btn">Close</button>
+        </div>
+      </div>
     </div>
   );
 };
